@@ -5,8 +5,8 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-from src.data import fetch_daily, fetch_hourly
-from src.strategy import add_indicators, backtest_daily
+from data import fetch_daily, fetch_hourly
+from strategy import add_indicators, backtest_daily
 
 ROOT = Path(__file__).resolve().parent
 HIST_EVENTS_PATH = ROOT / 'data' / 'gold_research_events.csv'
