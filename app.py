@@ -1,332 +1,246 @@
-from pathlib import Path
-from datetime import date, timedelta
-
-import pandas as pd
 import streamlit as st
+import pandas as pd
 import plotly.graph_objects as go
-
 from data import fetch_daily, fetch_hourly
-from strategy import add_indicators, backtest_daily
 
-ROOT = Path(__file__).resolve().parent
-HIST_EVENTS_PATH = ROOT / 'data' / 'gold_research_events.csv'
+st.set_page_config(page_title="Gold Strategy Time Machine", page_icon="🟡", layout="wide")
 
-st.set_page_config(page_title='Gold Breakout Time Machine', layout='wide')
-st.title('Gold Futures — Breakout Time Machine')
-st.caption(
-    'Historical chart = exact research trades for the agreed system: 50D Donchian + ADX ≥ 15, '
-    'long only, 2 ATR initial stop, 1.5 ATR trailing stop, 15-bar maximum hold. No 0.80 filter.'
-)
+st.markdown("""
+<style>
+.block-container {padding-top:1rem; padding-bottom:1rem; max-width:1500px;}
+[data-testid="stMetric"] {padding:.35rem .6rem;}
+</style>
+""", unsafe_allow_html=True)
 
+@st.cache_data(ttl=3600)
+def load_daily():
+    return fetch_daily()
 
-def load_csv(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path, parse_dates=['timestamp_utc'])
+@st.cache_data(ttl=3600)
+def load_hourly():
+    return fetch_hourly()
 
+@st.cache_data
+def load_events():
+    df = pd.read_csv("data/gold_research_events.csv")
+    for c in ["signal_date", "entry_date", "exit_date"]:
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+    return df
 
-def load_daily() -> pd.DataFrame:
-    return load_csv(ROOT / 'data' / 'gold_daily.csv')
+def naive_index(idx):
+    idx = pd.to_datetime(idx, errors="coerce")
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    return idx
 
-
-def load_hourly() -> pd.DataFrame:
-    live_path = ROOT / 'data' / 'gold_hourly.csv'
-    if live_path.exists():
-        return load_csv(live_path)
-    return load_csv(ROOT / 'data' / 'gold_hourly_seed.csv')
-
-
-def load_research_events() -> pd.DataFrame:
-    if not HIST_EVENTS_PATH.exists():
-        return pd.DataFrame()
-    e = pd.read_csv(HIST_EVENTS_PATH, parse_dates=['signal_date', 'entry_date', 'exit_date'])
-    for c in ['signal_date', 'entry_date', 'exit_date']:
-        e[c] = pd.to_datetime(e[c], utc=True)
-    e['buy_event'] = 'BUY'
-    e['exit_event'] = e['exit_reason'].map({
-        'initial_stop': 'SL',
-        'trailing_stop': 'TSL',
-        'time_exit': 'TIME',
-    }).fillna(e['exit_reason'].astype(str))
-    return e.sort_values('entry_date').reset_index(drop=True)
-
-
-if 'daily' not in st.session_state:
-    st.session_state.daily = load_daily()
-if 'hourly' not in st.session_state:
-    st.session_state.hourly = load_hourly()
-
-research_events = load_research_events()
+st.title("🟡 Gold Strategy — Time Machine")
+st.caption("Historical BUY → SL / TSL / TIME • Approved research configuration")
 
 with st.sidebar:
-    st.header('Time travel')
-    mode = st.radio('Candle timeframe', ['Daily — full 8+ year history', 'Hourly — recent 2 years'])
-    st.caption('Tip: use the date range to zoom into a trade. Markers are intentionally label-free; hover for details.')
+    st.header("View")
+    timeframe = st.radio("Candle timeframe", ["Daily", "Hourly"], index=0)
+    period = st.selectbox("Quick range", ["3 months", "6 months", "1 year", "2 years", "5 years", "All available"], index=2)
 
-    if research_events.empty:
-        st.error('Historical research event file is missing.')
+    st.subheader("Signals")
+    show_buy = st.checkbox("🟢 BUY", True)
+    show_sl = st.checkbox("🔴 SL", True)
+    show_tsl = st.checkbox("🟠 TSL", True)
+    show_time = st.checkbox("⚪ TIME", False)
 
-    # Date bounds are driven by the selected candle set.
-    if mode.startswith('Daily'):
-        min_date = pd.to_datetime(st.session_state.daily['timestamp_utc'], utc=True).min().date()
-        max_date = pd.to_datetime(st.session_state.daily['timestamp_utc'], utc=True).max().date()
-        default_start = min_date
-        default_end = max_date
-    else:
-        htmp = pd.to_datetime(st.session_state.hourly['timestamp_utc'], utc=True)
-        max_ts = htmp.max()
-        min_ts = max_ts - pd.Timedelta(days=730)
-        min_date = max(min_ts.date(), htmp.min().date())
-        max_date = max_ts.date()
-        default_start = max(min_date, date(2024, 9, 22))
-        default_end = max_date
-
-    selected = st.date_input(
-        'Chart date range',
-        value=(default_start, default_end),
-        min_value=min_date,
-        max_value=max_date,
-        format='DD/MM/YYYY',
-        help='Pick any historical period. This is the dashboard\'s time-travel control.',
-    )
-
-    st.divider()
-    st.subheader('Chart markers')
-    show_buy = st.checkbox('BUY', value=True)
-    show_sl = st.checkbox('SL', value=True)
-    show_tsl = st.checkbox('TSL', value=True)
-    show_time = st.checkbox('TIME', value=False)
-    st.divider()
-    if st.button('Refresh Yahoo data', use_container_width=True):
-        with st.spinner('Fetching Yahoo Finance data...'):
-            st.session_state.daily = fetch_daily()
-            st.session_state.hourly = fetch_hourly()
-        st.success('Data refreshed. Reloading dashboard…')
+    if st.button("↻ Refresh Yahoo data", use_container_width=True):
+        load_daily.clear()
+        load_hourly.clear()
         st.rerun()
 
-    st.caption('GitHub Actions can refresh Yahoo data automatically. The dashboard itself is read-only for the stored historical trades.')
+daily = load_daily().copy()
+hourly = load_hourly().copy()
+events = load_events().copy()
 
-# Normalize data.
-daily = st.session_state.daily.copy()
-daily['timestamp_utc'] = pd.to_datetime(daily['timestamp_utc'], utc=True)
-daily = add_indicators(daily)
-hourly = st.session_state.hourly.copy()
-hourly['timestamp_utc'] = pd.to_datetime(hourly['timestamp_utc'], utc=True)
-hourly = hourly.sort_values('timestamp_utc').drop_duplicates('timestamp_utc')
+daily.index = naive_index(daily.index)
+hourly.index = naive_index(hourly.index)
+for c in ["signal_date", "entry_date", "exit_date"]:
+    events[c] = naive_index(events[c])
 
-# Exact historical research events: only the approved candidate strategy.
-if not research_events.empty:
-    research_events = research_events[research_events['side'].eq('long')].copy()
-    research_events = research_events[
-        research_events['donchian'].eq(50)
-        & research_events['adx_min'].eq(15)
-        & research_events['hold_bars'].eq(15)
-        & research_events['initial_stop_atr'].eq(2)
-        & research_events['trail_atr'].eq(1.5)
-        & research_events['target'].eq(0.03)
-    ].copy()
+prices = daily.sort_index() if timeframe == "Daily" else hourly.sort_index()
+last_date = prices.index.max()
 
-# Operational forward layer. It starts from the daily data currently available.
-# This layer is intentionally kept separate from historical research so the chart never silently
-# substitutes a different implementation for the research history.
-live_events = backtest_daily(daily)
-if not live_events.empty:
-    live_events['timestamp_utc'] = pd.to_datetime(live_events['timestamp_utc'], utc=True)
+offset = {
+    "3 months": pd.DateOffset(months=3),
+    "6 months": pd.DateOffset(months=6),
+    "1 year": pd.DateOffset(years=1),
+    "2 years": pd.DateOffset(years=2),
+    "5 years": pd.DateOffset(years=5),
+}.get(period)
 
-last = daily.iloc[-1]
-latest_hist = research_events.iloc[-1] if not research_events.empty else None
+default_start = prices.index.min() if offset is None else last_date - offset
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric('Last daily close', f"{last.close:,.2f}")
-c2.metric('ADX', f"{last.adx:,.1f}" if pd.notna(last.get('adx')) else '—')
-c3.metric('Historical trades', f"{len(research_events):,}")
-c4.metric('Data through', pd.Timestamp(last.timestamp_utc).strftime('%d %b %Y'))
+with st.sidebar:
+    start_date = st.date_input("From", value=default_start.date(), min_value=prices.index.min().date(), max_value=last_date.date())
+    end_date = st.date_input("To", value=last_date.date(), min_value=prices.index.min().date(), max_value=last_date.date())
 
-# Normalize date selection.
-if isinstance(selected, tuple) and len(selected) == 2:
-    start_date, end_date = selected
-else:
-    start_date = end_date = selected
-start_ts = pd.Timestamp(start_date, tz='UTC')
-end_ts = pd.Timestamp(end_date, tz='UTC') + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
-
-if mode.startswith('Daily'):
-    chart_df = daily[(daily.timestamp_utc >= start_ts) & (daily.timestamp_utc <= end_ts)].copy()
-    chart_label = 'Daily candles — full available history'
-else:
-    # Enforce the recent ~2-year hourly window, then apply the user's time-travel range.
-    latest_hour = hourly['timestamp_utc'].max()
-    hourly_floor = latest_hour - pd.Timedelta(days=730)
-    chart_df = hourly[
-        (hourly.timestamp_utc >= hourly_floor)
-        & (hourly.timestamp_utc >= start_ts)
-        & (hourly.timestamp_utc <= end_ts)
-    ].copy()
-    chart_label = 'Hourly candles — recent ~2 years'
-
-if chart_df.empty:
-    st.warning('No candles exist in the selected date range.')
+if start_date > end_date:
+    st.error("The From date must be before the To date.")
     st.stop()
 
-# Historical event markers. On daily charts, use the actual research entry/exit dates and prices.
-# On hourly charts, snap the event timestamp to the first available hourly candle at/after the event.
-def snap_events_to_chart(events: pd.DataFrame, ts_col: str, price_col: str = 'price') -> pd.DataFrame:
-    if events.empty:
-        return pd.DataFrame(columns=['timestamp_utc', 'price', 'event'])
-    base = chart_df[['timestamp_utc', 'open', 'high', 'low', 'close']].sort_values('timestamp_utc')
-    q = events[[ts_col, price_col]].copy().rename(columns={ts_col: 'timestamp_utc', price_col: 'price'})
-    q = q.sort_values('timestamp_utc')
-    if mode.startswith('Hourly'):
-        q = pd.merge_asof(q, base[['timestamp_utc']], on='timestamp_utc', direction='forward')
-    return q.dropna(subset=['timestamp_utc']).drop_duplicates(['timestamp_utc', 'price'])
+visible = prices.loc[
+    (prices.index >= pd.Timestamp(start_date)) &
+    (prices.index < pd.Timestamp(end_date) + pd.Timedelta(days=1))
+].copy()
 
 fig = go.Figure()
+
 fig.add_trace(go.Candlestick(
-    x=chart_df.timestamp_utc,
-    open=chart_df.open,
-    high=chart_df.high,
-    low=chart_df.low,
-    close=chart_df.close,
-    name='GC=F',
+    x=visible.index,
+    open=visible["Open"], high=visible["High"],
+    low=visible["Low"], close=visible["Close"],
+    name="Gold",
+    increasing_line_color="#198754",
+    decreasing_line_color="#dc3545",
+    increasing_fillcolor="#198754",
+    decreasing_fillcolor="#dc3545",
+    whiskerwidth=0.45,
 ))
 
-# Research BUY markers.
-if not research_events.empty:
-    hist_buy = research_events[
-        (research_events.entry_date >= start_ts) & (research_events.entry_date <= end_ts)
-    ].copy()
-    buy = snap_events_to_chart(hist_buy, 'entry_date', 'entry')
-    if show_buy and not buy.empty:
-        buy['event'] = 'BUY'
-        fig.add_trace(go.Scatter(
-            x=buy.timestamp_utc, y=buy.price, mode='markers',
-            marker=dict(symbol='triangle-up', size=10, line=dict(width=1)), name='BUY',
-            customdata=buy[['price']].values,
-            hovertemplate='<b>BUY</b><br>%{x|%d %b %Y %H:%M}<br>Price: %{y:,.2f}<extra></extra>',
-        ))
+# Marker definitions: event, enabled, date field, symbol, color, vertical placement.
+marker_defs = [
+    ("BUY", show_buy, "entry_date", "triangle-up", "#198754", "low"),
+    ("SL", show_sl, "exit_date", "x", "#dc3545", "high"),
+    ("TSL", show_tsl, "exit_date", "triangle-down", "#f39c12", "high"),
+    ("TIME", show_time, "exit_date", "circle-open", "#6c757d", "high"),
+]
 
-    # Research exits: SL / TSL / TIME.
-    hist_exit = research_events[
-        (research_events.exit_date >= start_ts) & (research_events.exit_date <= end_ts)
-    ].copy()
-    for event_name, reason, symbol in [
-        ('SL', 'initial_stop', 'x'),
-        ('TSL', 'trailing_stop', 'diamond'),
-        ('TIME', 'time_exit', 'circle'),
-    ]:
-        q = hist_exit[hist_exit.exit_reason.eq(reason)]
-        q = snap_events_to_chart(q, 'exit_date', 'exit')
-        visible = {'SL': show_sl, 'TSL': show_tsl, 'TIME': show_time}[event_name]
-        if visible and not q.empty:
-            q['event'] = event_name
-            fig.add_trace(go.Scatter(
-                x=q.timestamp_utc, y=q.price, mode='markers',
-                marker=dict(symbol=symbol, size=9, line=dict(width=1)), name=event_name,
-                hovertemplate=f'<b>{event_name}</b><br>%{{x|%d %b %Y %H:%M}}<br>Price: %{{y:,.2f}}<extra></extra>',
-            ))
+for name, enabled, date_col, symbol, color, placement in marker_defs:
+    if not enabled:
+        continue
 
-# Optional forward/live layer: only events after the last research entry/exit date.
-# This keeps the historical time machine anchored to the authoritative research file.
-if latest_hist is not None and not live_events.empty:
-    live_cut = max(research_events.entry_date.max(), research_events.exit_date.max())
-    forward = live_events[live_events.timestamp_utc > live_cut].copy()
-    forward = forward[(forward.timestamp_utc >= start_ts) & (forward.timestamp_utc <= end_ts)]
-    for typ, symbol in [('BUY', 'triangle-up'), ('SL', 'x'), ('TSL', 'diamond'), ('TIME', 'circle')]:
-        visible = {'BUY': show_buy, 'SL': show_sl, 'TSL': show_tsl, 'TIME': show_time}[typ]
-        q = forward[forward.event.eq(typ)][['timestamp_utc', 'price']].copy()
-        if not visible or q.empty:
-            continue
-        q = snap_events_to_chart(q, 'timestamp_utc', 'price')
+    e = events.copy()
+    if name == "BUY":
+        e = e[e["side"].eq("long")]
+    else:
+        e = e[e["exit_reason"].eq(name)]
+
+    e = e[
+        (e[date_col] >= pd.Timestamp(start_date)) &
+        (e[date_col] < pd.Timestamp(end_date) + pd.Timedelta(days=1))
+    ].copy()
+
+    if e.empty:
+        continue
+
+    xs, ys, texts = [], [], []
+    for _, r in e.iterrows():
+        dt = r[date_col]
+        # Put historical daily events on the exact daily candle for Daily view.
+        # For Hourly view, place them on the first available hourly candle at/after the event.
+        candidates = visible.index[visible.index >= dt]
+        if len(candidates):
+            x = candidates[0]
+        else:
+            candidates = visible.index[visible.index <= dt]
+            if not len(candidates):
+                continue
+            x = candidates[-1]
+
+        candle = visible.loc[x]
+        price = float(r["entry"] if name == "BUY" else r["exit"])
+        y = float(candle["Low"]) * 0.997 if placement == "low" else float(candle["High"]) * 1.003
+
+        if name == "BUY":
+            text = (
+                f"<b>BUY</b><br>{pd.Timestamp(r['entry_date']).strftime('%d %b %Y')} "
+                f"@ {price:,.2f}<br>"
+                f"Exit: {pd.Timestamp(r['exit_date']).strftime('%d %b %Y')} "
+                f"@ {float(r['exit']):,.2f}<br>"
+                f"Exit: {r['exit_reason']}<br>"
+                f"+3% milestone: {'YES' if bool(r['target_hit']) else 'NO'}"
+            )
+        else:
+            text = (
+                f"<b>{name}</b><br>{pd.Timestamp(r['exit_date']).strftime('%d %b %Y')} "
+                f"@ {price:,.2f}<br>"
+                f"Entry: {pd.Timestamp(r['entry_date']).strftime('%d %b %Y')} "
+                f"@ {float(r['entry']):,.2f}<br>"
+                f"Net return: {float(r['net_return'])*100:.2f}%"
+            )
+
+        xs.append(x); ys.append(y); texts.append(text)
+
+    if xs:
         fig.add_trace(go.Scatter(
-            x=q.timestamp_utc, y=q.price, mode='markers',
-            marker=dict(symbol=symbol, size=8, line=dict(width=1)), name=f'{typ} (forward)',
-            hovertemplate=f'<b>FORWARD {typ}</b><br>%{{x|%d %b %Y %H:%M}}<br>Price: %{{y:,.2f}}<extra></extra>',
+            x=xs, y=ys, mode="markers", name=name,
+            marker=dict(symbol=symbol, size=14 if name == "BUY" else 12,
+                        color=color, line=dict(color="white", width=1.5)),
+            text=texts, hovertemplate="%{text}<extra></extra>",
         ))
 
 fig.update_layout(
-    height=680,
-    xaxis_rangeslider_visible=False,
-    xaxis_title=None,
-    yaxis_title='Gold price',
-    template='plotly_white',
-    hovermode='x',
-    hoverdistance=20,
-    spikedistance=-1,
-    legend=dict(orientation='h', yanchor='bottom', y=1.01, xanchor='left', x=0),
-    margin=dict(l=45, r=20, t=35, b=25),
+    height=700,
+    template="plotly_white",
+    margin=dict(l=10, r=20, t=45, b=15),
+    paper_bgcolor="white",
+    plot_bgcolor="white",
+    hovermode="x",
+    dragmode="zoom",
+    legend=dict(orientation="h", y=1.04, x=0, bgcolor="rgba(255,255,255,.9)"),
     xaxis=dict(
-        showgrid=False,
-        showline=True,
-        rangeslider=dict(visible=False),
+        title=None, showgrid=False, rangeslider=dict(visible=False),
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        showline=True, linecolor="#adb5bd",
         rangeselector=dict(
             buttons=[
-                dict(count=3, label='3M', step='month', stepmode='backward'),
-                dict(count=6, label='6M', step='month', stepmode='backward'),
-                dict(count=1, label='1Y', step='year', stepmode='backward'),
-                dict(step='all', label='ALL'),
+                dict(count=3, label="3M", step="month", stepmode="backward"),
+                dict(count=6, label="6M", step="month", stepmode="backward"),
+                dict(count=1, label="1Y", step="year", stepmode="backward"),
+                dict(count=2, label="2Y", step="year", stepmode="backward"),
+                dict(step="all", label="ALL"),
             ],
-            x=0, xanchor='left', y=1.02, yanchor='bottom'
-        )
+            x=0, y=1.08
+        ),
     ),
-    yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.18)', fixedrange=False),
+    yaxis=dict(
+        title="Gold price",
+        side="right",
+        showgrid=True,
+        gridcolor="rgba(108,117,125,.12)",
+        zeroline=False,
+        tickformat=",.0f",
+        showline=True, linecolor="#adb5bd",
+    ),
 )
 
-st.subheader(chart_label)
 st.plotly_chart(
-    fig,
-    width='stretch',
-    config={'scrollZoom': True, 'displaylogo': False, 'responsive': True, 'modeBarButtonsToRemove': ['lasso2d', 'select2d']},
+    fig, use_container_width=True,
+    config={
+        "displaylogo": False,
+        "scrollZoom": True,
+        "displayModeBar": True,
+        "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+    },
 )
 
-# Trade lookup table for the selected window.
-st.subheader('Trades in selected period')
-if not research_events.empty:
-    selected_trades = research_events[
-        (research_events.entry_date <= end_ts) & (research_events.exit_date >= start_ts)
-    ].copy()
-    selected_trades['Exit signal'] = selected_trades['exit_reason'].map({
-        'initial_stop': 'SL', 'trailing_stop': 'TSL', 'time_exit': 'TIME'
-    })
-    selected_trades['Return'] = selected_trades['net_return'].map(lambda x: f'{x:.2%}')
-    selected_trades['+3% hit'] = selected_trades['target_hit'].map(lambda x: 'YES' if bool(x) else 'NO')
-    table = selected_trades[
-        ['signal_date', 'entry_date', 'entry', 'exit_date', 'exit', 'Exit signal', 'Return', '+3% hit']
-    ].sort_values('entry_date', ascending=False)
-    st.dataframe(table, use_container_width=True, hide_index=True)
+ev = events[
+    (events["entry_date"] >= pd.Timestamp(start_date)) &
+    (events["entry_date"] < pd.Timestamp(end_date) + pd.Timedelta(days=1))
+].copy()
+
+st.subheader("Trades in selected period")
+
+if ev.empty:
+    st.info("No research trades in this period.")
 else:
-    st.info('No historical research events found.')
+    out = pd.DataFrame({
+        "BUY": ev["entry_date"].dt.strftime("%d %b %Y"),
+        "Entry": ev["entry"].map(lambda x: f"{x:,.2f}"),
+        "EXIT": ev["exit_date"].dt.strftime("%d %b %Y"),
+        "Exit": ev["exit"].map(lambda x: f"{x:,.2f}"),
+        "Type": ev["exit_reason"],
+        "Net": ev["net_return"].map(lambda x: f"{x*100:.2f}%"),
+        "+3%": ev["target_hit"].map(lambda x: "YES" if bool(x) else "NO"),
+    })
+    st.dataframe(out.sort_values("BUY", ascending=False), use_container_width=True, hide_index=True)
 
-# “What happened around this date?” lookup.
-st.subheader('Historical signal lookup')
-lookup_date = st.date_input(
-    'Choose a date to inspect',
-    value=min(max(date(2024, 1, 1), min_date), max_date),
-    min_value=min_date,
-    max_value=max_date,
-    format='DD/MM/YYYY',
-    key='lookup_date',
-)
-lookup_ts = pd.Timestamp(lookup_date, tz='UTC')
-if not research_events.empty:
-    nearby = research_events[
-        (research_events.entry_date >= lookup_ts - pd.Timedelta(days=10))
-        & (research_events.exit_date <= lookup_ts + pd.Timedelta(days=20))
-    ].copy()
-    if nearby.empty:
-        st.info('No research trade starts/ends close to this date.')
-    else:
-        nearby['BUY'] = nearby['entry_date'].dt.strftime('%d %b %Y')
-        nearby['EXIT'] = nearby['exit_date'].dt.strftime('%d %b %Y')
-        nearby['EXIT TYPE'] = nearby['exit_reason'].map({
-            'initial_stop': 'SL', 'trailing_stop': 'TSL', 'time_exit': 'TIME'
-        })
-        nearby['NET'] = nearby['net_return'].map(lambda x: f'{x:.2%}')
-        st.dataframe(
-            nearby[['BUY', 'entry', 'EXIT', 'exit', 'EXIT TYPE', 'NET', 'target_hit']],
-            use_container_width=True,
-            hide_index=True,
-        )
-
-st.info(
-    'Historical BUY/SL/TSL/TIME markers come from the approved research event file, so the chart is a true '
-    'time-travel view of the tested system. The forward layer is intentionally labeled separately because its '
-    'live-safe implementation has not been certified as byte-for-byte identical to the research engine.'
+st.caption(
+    f"Data through {last_date.strftime('%d %b %Y %H:%M')} • "
+    f"{len(visible):,} {timeframe.lower()} candles • "
+    f"Times shown in the dataset's normalized timezone."
 )
