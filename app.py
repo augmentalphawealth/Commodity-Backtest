@@ -59,6 +59,7 @@ research_events = load_research_events()
 with st.sidebar:
     st.header('Time travel')
     mode = st.radio('Candle timeframe', ['Daily — full 8+ year history', 'Hourly — recent 2 years'])
+    st.caption('Tip: use the date range to zoom into a trade. Markers are intentionally label-free; hover for details.')
 
     if research_events.empty:
         st.error('Historical research event file is missing.')
@@ -87,6 +88,12 @@ with st.sidebar:
         help='Pick any historical period. This is the dashboard\'s time-travel control.',
     )
 
+    st.divider()
+    st.subheader('Chart markers')
+    show_buy = st.checkbox('BUY', value=True)
+    show_sl = st.checkbox('SL', value=True)
+    show_tsl = st.checkbox('TSL', value=True)
+    show_time = st.checkbox('TIME', value=False)
     st.divider()
     if st.button('Refresh Yahoo data', use_container_width=True):
         with st.spinner('Fetching Yahoo Finance data...'):
@@ -187,14 +194,13 @@ if not research_events.empty:
         (research_events.entry_date >= start_ts) & (research_events.entry_date <= end_ts)
     ].copy()
     buy = snap_events_to_chart(hist_buy, 'entry_date', 'entry')
-    if not buy.empty:
+    if show_buy and not buy.empty:
         buy['event'] = 'BUY'
         fig.add_trace(go.Scatter(
-            x=buy.timestamp_utc, y=buy.price, mode='markers+text',
-            text=['BUY'] * len(buy), textposition='top center',
-            marker=dict(symbol='triangle-up', size=12), name='BUY (research)',
+            x=buy.timestamp_utc, y=buy.price, mode='markers',
+            marker=dict(symbol='triangle-up', size=10, line=dict(width=1)), name='BUY',
             customdata=buy[['price']].values,
-            hovertemplate='BUY<br>%{x|%d %b %Y %H:%M}<br>Price: %{y:,.2f}<extra></extra>',
+            hovertemplate='<b>BUY</b><br>%{x|%d %b %Y %H:%M}<br>Price: %{y:,.2f}<extra></extra>',
         ))
 
     # Research exits: SL / TSL / TIME.
@@ -208,13 +214,13 @@ if not research_events.empty:
     ]:
         q = hist_exit[hist_exit.exit_reason.eq(reason)]
         q = snap_events_to_chart(q, 'exit_date', 'exit')
-        if not q.empty:
+        visible = {'SL': show_sl, 'TSL': show_tsl, 'TIME': show_time}[event_name]
+        if visible and not q.empty:
             q['event'] = event_name
             fig.add_trace(go.Scatter(
-                x=q.timestamp_utc, y=q.price, mode='markers+text',
-                text=[event_name] * len(q), textposition='bottom center',
-                marker=dict(symbol=symbol, size=11), name=f'{event_name} (research)',
-                hovertemplate=f'{event_name}<br>%{{x|%d %b %Y %H:%M}}<br>Price: %{{y:,.2f}}<extra></extra>',
+                x=q.timestamp_utc, y=q.price, mode='markers',
+                marker=dict(symbol=symbol, size=9, line=dict(width=1)), name=event_name,
+                hovertemplate=f'<b>{event_name}</b><br>%{{x|%d %b %Y %H:%M}}<br>Price: %{{y:,.2f}}<extra></extra>',
             ))
 
 # Optional forward/live layer: only events after the last research entry/exit date.
@@ -224,33 +230,50 @@ if latest_hist is not None and not live_events.empty:
     forward = live_events[live_events.timestamp_utc > live_cut].copy()
     forward = forward[(forward.timestamp_utc >= start_ts) & (forward.timestamp_utc <= end_ts)]
     for typ, symbol in [('BUY', 'triangle-up'), ('SL', 'x'), ('TSL', 'diamond'), ('TIME', 'circle')]:
+        visible = {'BUY': show_buy, 'SL': show_sl, 'TSL': show_tsl, 'TIME': show_time}[typ]
         q = forward[forward.event.eq(typ)][['timestamp_utc', 'price']].copy()
-        if q.empty:
+        if not visible or q.empty:
             continue
         q = snap_events_to_chart(q, 'timestamp_utc', 'price')
         fig.add_trace(go.Scatter(
-            x=q.timestamp_utc, y=q.price, mode='markers+text',
-            text=[typ] * len(q), textposition='top center',
-            marker=dict(symbol=symbol, size=10), name=f'{typ} (forward)',
-            hovertemplate=f'FORWARD {typ}<br>%{{x|%d %b %Y %H:%M}}<br>Price: %{{y:,.2f}}<extra></extra>',
+            x=q.timestamp_utc, y=q.price, mode='markers',
+            marker=dict(symbol=symbol, size=8, line=dict(width=1)), name=f'{typ} (forward)',
+            hovertemplate=f'<b>FORWARD {typ}</b><br>%{{x|%d %b %Y %H:%M}}<br>Price: %{{y:,.2f}}<extra></extra>',
         ))
 
 fig.update_layout(
-    height=760,
-    xaxis_rangeslider_visible=True,
-    xaxis_title='Date / time',
+    height=680,
+    xaxis_rangeslider_visible=False,
+    xaxis_title=None,
     yaxis_title='Gold price',
     template='plotly_white',
-    hovermode='x unified',
-    legend_orientation='h',
-    margin=dict(l=10, r=10, t=40, b=10),
+    hovermode='x',
+    hoverdistance=20,
+    spikedistance=-1,
+    legend=dict(orientation='h', yanchor='bottom', y=1.01, xanchor='left', x=0),
+    margin=dict(l=45, r=20, t=35, b=25),
+    xaxis=dict(
+        showgrid=False,
+        showline=True,
+        rangeslider=dict(visible=False),
+        rangeselector=dict(
+            buttons=[
+                dict(count=3, label='3M', step='month', stepmode='backward'),
+                dict(count=6, label='6M', step='month', stepmode='backward'),
+                dict(count=1, label='1Y', step='year', stepmode='backward'),
+                dict(step='all', label='ALL'),
+            ],
+            x=0, xanchor='left', y=1.02, yanchor='bottom'
+        )
+    ),
+    yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.18)', fixedrange=False),
 )
 
 st.subheader(chart_label)
 st.plotly_chart(
     fig,
-    use_container_width=True,
-    config={'scrollZoom': True, 'displaylogo': False, 'responsive': True},
+    width='stretch',
+    config={'scrollZoom': True, 'displaylogo': False, 'responsive': True, 'modeBarButtonsToRemove': ['lasso2d', 'select2d']},
 )
 
 # Trade lookup table for the selected window.
