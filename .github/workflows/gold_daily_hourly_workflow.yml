@@ -3,36 +3,103 @@ name: Gold Daily and Hourly Backtest
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 18 * * 1-5"
+    # Runs at 00:00 UTC, Monday through Friday.
+    - cron: "0 0 * * 1-5"
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
 
 jobs:
-  backtest:
+  gold-backtest:
+    name: Download Gold Data and Run Backtest
     runs-on: ubuntu-latest
     timeout-minutes: 45
+
     steps:
-      - name: Checkout
+      - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements_gold_downloader.txt
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements_gold_downloader.txt
+          python -m pip install -r requirements_gold_downloader.txt
+
+      - name: Restore gold data cache
+        uses: actions/cache@v4
+        with:
+          path: data_usd/cache_hourly
+          key: gold-hourly-cache-${{ github.run_id }}
+          restore-keys: |
+            gold-hourly-cache-
 
       - name: Download daily and hourly gold data
-        run: python gold_usd_data_downloader.py
+        run: python gold_usd_hourly_downloader.py
 
-      - name: Run multi-timeframe analysis
+      - name: Verify downloaded datasets
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest_path = Path("data_usd/gold_usd_manifest.json")
+          if not manifest_path.exists():
+              raise SystemExit("Missing data_usd/gold_usd_manifest.json")
+
+          manifest = json.loads(manifest_path.read_text())
+          hourly = manifest.get("hourly", {})
+          daily = manifest.get("daily", {})
+
+          hourly_rows = int(hourly.get("rows", 0) or 0)
+          daily_rows = int(daily.get("rows", 0) or 0)
+
+          print("Hourly rows:", hourly_rows)
+          print("Hourly start:", hourly.get("actual_start_utc"))
+          print("Hourly end:", hourly.get("actual_end_utc"))
+          print("Daily rows:", daily_rows)
+          print("Daily start:", daily.get("actual_start_utc"))
+          print("Daily end:", daily.get("actual_end_utc"))
+
+          if daily_rows < 1000:
+              raise SystemExit("Daily dataset is unexpectedly small")
+
+          if hourly_rows < 250:
+              raise SystemExit("Hourly dataset is unexpectedly small")
+          PY
+
+      - name: Run multi-timeframe gold analysis
         run: python gold_multi_timeframe_analysis.py
 
-      - name: Upload data and results
+      - name: Verify analysis output
+        run: |
+          test -s gold_results/analysis_manifest.json
+          test -s gold_results/gold_summary_all.csv
+          test -s gold_results/gold_best_configurations.csv
+          test -s gold_results/gold_events_all.csv
+
+      - name: Upload gold data and backtest results
         uses: actions/upload-artifact@v4
         with:
-          name: gold-daily-hourly-results
+          name: gold-daily-hourly-results-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 30
           path: |
-            data_usd/
-            gold_results/
+            data_usd/gold_usd_manifest.json
+            data_usd/gold_usd_1d.csv
+            data_usd/gold_usd_1h.csv
+            gold_results/analysis_manifest.json
+            gold_results/gold_summary_all.csv
+            gold_results/gold_best_configurations.csv
+            gold_results/gold_events_all.csv
+            gold_results/gold_events_1d.csv
+            gold_results/gold_events_4h.csv
+            gold_results/gold_events_1h.csv
