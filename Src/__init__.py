@@ -1,0 +1,1 @@
+"""Gold dashboard application package."""
