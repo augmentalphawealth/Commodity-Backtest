@@ -7,97 +7,76 @@ import pandas as pd
 import yfinance as yf
 
 SYMBOL = "GC=F"
-
+INTERVAL = "1h"
 HOURLY_LOOKBACK_DAYS = 720
-HOURLY_CHUNK_DAYS = 30
-
-DAILY_START = "2018-01-01"
-DAILY_CHUNK_DAYS = 365
-
+CHUNK_DAYS = 30
 SLEEP_SECONDS = 2
 MAX_RETRIES = 5
 
 DATA_DIR = Path("data_usd")
-HOURLY_CACHE = DATA_DIR / "cache_hourly"
-DAILY_CACHE = DATA_DIR / "cache_daily"
-
+CACHE_DIR = DATA_DIR / "cache_hourly"
 DATA_DIR.mkdir(exist_ok=True)
-HOURLY_CACHE.mkdir(exist_ok=True)
-DAILY_CACHE.mkdir(exist_ok=True)
+CACHE_DIR.mkdir(exist_ok=True)
 
-HOURLY_FILE = DATA_DIR / "gold_usd_1h.csv"
-DAILY_FILE = DATA_DIR / "gold_usd_1d.csv"
-MANIFEST_FILE = DATA_DIR / "gold_usd_manifest.json"
+OUTPUT_FILE = DATA_DIR / "gold_usd_1h.csv"
+MANIFEST_FILE = DATA_DIR / "gold_usd_1h_manifest.json"
 
 
-def empty_frame():
+def empty_data():
     return pd.DataFrame(
         columns=["open", "high", "low", "close", "volume"]
     )
 
 
-def clean_frame(frame):
+def flatten_columns(columns):
+    if not isinstance(columns, pd.MultiIndex):
+        return [str(column).lower() for column in columns]
+
+    flattened = []
+    for column in columns:
+        parts = [str(part) for part in column if str(part) != ""]
+        flattened.append(parts[0].lower() if parts else "")
+    return flattened
+
+
+def clean_data(frame):
     if frame is None or frame.empty:
-        return empty_frame()
+        return empty_data()
 
     frame = frame.copy()
+    frame.columns = flatten_columns(frame.columns)
 
-    if isinstance(frame.columns, pd.MultiIndex):
-        frame.columns = [
-            str(column[-1]).lower()
-            for column in frame.columns
-        ]
-    else:
-        frame.columns = [
-            str(column).lower()
-            for column in frame.columns
-        ]
-
-    frame = frame.rename(
-        columns={
-            "adj close": "close",
-            "datetime": "timestamp_utc",
-        }
-    )
+    if "adj close" in frame.columns and "close" not in frame.columns:
+        frame = frame.rename(columns={"adj close": "close"})
 
     wanted = ["open", "high", "low", "close", "volume"]
-    available = [
-        column for column in wanted
-        if column in frame.columns
-    ]
-
+    available = [column for column in wanted if column in frame.columns]
     frame = frame[available].copy()
 
-    if not isinstance(frame.index, pd.DatetimeIndex):
-        frame.index = pd.to_datetime(
-            frame.index,
-            utc=True,
-            errors="coerce",
-        )
-    else:
-        frame.index = pd.to_datetime(
-            frame.index,
-            utc=True,
-        )
-
+    index = pd.to_datetime(
+        frame.index,
+        utc=True,
+        errors="coerce",
+    )
+    frame.index = index
     frame = frame[~frame.index.isna()]
-    frame = frame[~frame.index.duplicated()]
+    frame = frame[~frame.index.duplicated(keep="last")]
     frame = frame.sort_index()
 
     for column in frame.columns:
-        frame[column] = pd.to_numeric(
-            frame[column],
-            errors="coerce",
-        )
+        values = frame[column]
+        if isinstance(values, pd.DataFrame):
+            values = values.iloc[:, 0]
+        frame[column] = pd.to_numeric(values, errors="coerce")
 
     return frame.dropna(
         subset=["open", "high", "low", "close"]
     )
 
 
-def download_chunk(start, end, interval, cache_dir):
-    cache_file = cache_dir / (
-        f"{start:%Y%m%d}_{end:%Y%m%d}_{interval}.csv"
+def get_chunk(start, end):
+    cache_file = CACHE_DIR / (
+        f"{start:%Y%m%d}_{end:%Y%m%d}_1h.csv"
     )
 
     if cache_file.exists() and cache_file.stat().st_size > 100:
@@ -105,35 +84,30 @@ def download_chunk(start, end, interval, cache_dir):
             cache_file,
             parse_dates=["timestamp_utc"],
         )
-
         cached = cached.set_index("timestamp_utc")
         cached.index = pd.to_datetime(
             cached.index,
             utc=True,
         )
-
         return cached
 
     for attempt in range(1, MAX_RETRIES + 1):
         print(
-            f"{interval}: "
-            f"{start:%Y-%m-%d} to {end:%Y-%m-%d}, "
+            f"1h: {start:%Y-%m-%d} to {end:%Y-%m-%d}, "
             f"attempt {attempt}"
         )
 
         try:
-            ticker = yf.Ticker(SYMBOL)
-
-            raw = ticker.history(
+            raw = yf.Ticker(SYMBOL).history(
                 start=start.strftime("%Y-%m-%d"),
                 end=end.strftime("%Y-%m-%d"),
-                interval=interval,
+                interval="1h",
                 auto_adjust=False,
                 actions=False,
                 repair=False,
             )
 
-            cleaned = clean_frame(raw)
+            cleaned = clean_data(raw)
 
             if not cleaned.empty:
                 cleaned.to_csv(
@@ -145,133 +119,69 @@ def download_chunk(start, end, interval, cache_dir):
 
         except Exception as error:
             print(f"Download error: {error}")
-
             if attempt < MAX_RETRIES:
                 time.sleep(SLEEP_SECONDS * attempt)
 
-    return empty_frame()
+    return empty_data()
 
 
-def download_range(
-    start,
-    end,
-    interval,
-    chunk_days,
-    cache_dir,
-):
-    pieces = []
+def main():
+    end = pd.Timestamp.now(tz="UTC").floor("h")
+    start = end - pd.Timedelta(days=HOURLY_LOOKBACK_DAYS)
+
+    parts = []
     cursor = start
 
     while cursor < end:
         chunk_end = min(
-            cursor + pd.Timedelta(days=chunk_days),
+            cursor + pd.Timedelta(days=CHUNK_DAYS),
             end,
         )
-
-        piece = download_chunk(
-            cursor,
-            chunk_end,
-            interval,
-            cache_dir,
-        )
-
-        if not piece.empty:
-            pieces.append(piece)
-
+        part = get_chunk(cursor, chunk_end)
+        if not part.empty:
+            parts.append(part)
         cursor = chunk_end
         time.sleep(SLEEP_SECONDS)
 
-    if not pieces:
-        return empty_frame()
+    if parts:
+        data = pd.concat(parts)
+        data = data[~data.index.duplicated(keep="last")]
+        data = data.sort_index()
+    else:
+        data = empty_data()
 
-    combined = pd.concat(pieces)
-
-    combined = combined[
-        ~combined.index.duplicated()
-    ].sort_index()
-
-    return combined
-
-
-def main():
-    now = pd.Timestamp.now(
-        tz="UTC"
-    ).floor("h")
-
-    hourly_start = (
-        now - pd.Timedelta(days=HOURLY_LOOKBACK_DAYS)
-    )
-
-    daily_start = pd.Timestamp(
-        DAILY_START,
-        tz="UTC",
-    )
-
-    hourly = download_range(
-        hourly_start,
-        now,
-        "1h",
-        HOURLY_CHUNK_DAYS,
-        HOURLY_CACHE,
-    )
-
-    daily = download_range(
-        daily_start,
-        now,
-        "1d",
-        DAILY_CHUNK_DAYS,
-        DAILY_CACHE,
-    )
-
-    hourly.to_csv(
-        HOURLY_FILE,
-        index_label="timestamp_utc",
-    )
-
-    daily.to_csv(
-        DAILY_FILE,
+    data.to_csv(
+        OUTPUT_FILE,
         index_label="timestamp_utc",
     )
 
     manifest = {
         "symbol": SYMBOL,
         "currency": "USD",
+        "interval": INTERVAL,
         "provider": "Yahoo Finance via yfinance",
-        "downloaded_at_utc": datetime.now(
+        "requested_start_utc": start.isoformat(),
+        "requested_end_utc": end.isoformat(),
+        "rows": int(len(data)),
+        "actual_start_utc": (
+            data.index.min().isoformat()
+            if len(data)
+            else None
+        ),
+        "actual_end_utc": (
+            data.index.max().isoformat()
+            if len(data)
+            else None
+        ),
+        "file": str(OUTPUT_FILE),
+        "cache_directory": str(CACHE_DIR),
+        "note": (
+            "Hourly history is limited by Yahoo. "
+            "This file covers the available recent period only."
+        ),
+        "created_at_utc": datetime.now(
             timezone.utc
         ).isoformat(),
-        "hourly": {
-            "requested_start_utc": hourly_start.isoformat(),
-            "requested_end_utc": now.isoformat(),
-            "rows": int(len(hourly)),
-            "actual_start_utc": (
-                hourly.index.min().isoformat()
-                if len(hourly)
-                else None
-            ),
-            "actual_end_utc": (
-                hourly.index.max().isoformat()
-                if len(hourly)
-                else None
-            ),
-            "file": str(HOURLY_FILE),
-        },
-        "daily": {
-            "requested_start_utc": daily_start.isoformat(),
-            "requested_end_utc": now.isoformat(),
-            "rows": int(len(daily)),
-            "actual_start_utc": (
-                daily.index.min().isoformat()
-                if len(daily)
-                else None
-            ),
-            "actual_end_utc": (
-                daily.index.max().isoformat()
-                if len(daily)
-                else None
-            ),
-            "file": str(DAILY_FILE),
-        },
     }
 
     MANIFEST_FILE.write_text(
