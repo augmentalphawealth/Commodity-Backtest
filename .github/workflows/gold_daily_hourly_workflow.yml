@@ -1,0 +1,38 @@
+name: Gold Daily and Hourly Backtest
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 18 * * 1-5"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements_gold_downloader.txt
+
+      - name: Download daily and hourly gold data
+        run: python gold_usd_data_downloader.py
+
+      - name: Run multi-timeframe analysis
+        run: python gold_multi_timeframe_analysis.py
+
+      - name: Upload data and results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gold-daily-hourly-results
+          path: |
+            data_usd/
+            gold_results/
