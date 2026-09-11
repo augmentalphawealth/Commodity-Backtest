@@ -21,7 +21,8 @@ HOLDS = {"1h": [24, 48, 120], "4h": [12, 24, 60], "1d": [5, 10, 15]}
 def load_file(path):
     if not path.exists():
         raise FileNotFoundError(f"Missing {path}")
-    df = pd.read_csv(path, parse_dates=["timestamp_utc"]).set_index("timestamp_utc").sort_index()
+    df = pd.read_csv(path, parse_dates=["timestamp_utc"])
+    df = df.set_index("timestamp_utc").sort_index()
     df.index = pd.to_datetime(df.index, utc=True)
     return df.dropna(subset=["open", "high", "low", "close"])
 
@@ -42,9 +43,9 @@ def indicators(df, n):
     minus = down.where((down > up) & (down > 0), 0.0).rolling(14).mean()
     pdi, mdi = 100*plus/x.atr, 100*minus/x.atr
     x["adx"] = (100*(pdi-mdi).abs()/(pdi+mdi)).rolling(14).mean()
-    change = x.close.diff()
-    gain = change.clip(lower=0).rolling(14).mean()
-    loss = -change.clip(upper=0).rolling(14).mean()
+    delta = x.close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = -delta.clip(upper=0).rolling(14).mean()
     x["rsi"] = 100-100/(1+gain/loss.replace(0, np.nan))
     x["prior_high"] = x.high.shift(1).rolling(n).max()
     x["prior_low"] = x.low.shift(1).rolling(n).min()
@@ -53,12 +54,16 @@ def indicators(df, n):
 
 
 def evaluate(x, i, side, target, hold, initial_mult, trail_mult):
-    entry_i = i+1
-    if entry_i >= len(x): return None
+    entry_i = i + 1
+    if entry_i >= len(x):
+        return None
     entry = float(x.iloc[entry_i].open)
     signal_atr = float(x.iloc[i].atr)
-    if not np.isfinite(entry) or not np.isfinite(signal_atr) or signal_atr <= 0: return None
-    path = x.iloc[entry_i:min(len(x), entry_i+hold)]
+    if not np.isfinite(entry) or not np.isfinite(signal_atr) or signal_atr <= 0:
+        return None
+    path = x.iloc[entry_i:min(len(x), entry_i + hold)]
+    if path.empty:
+        return None
     target_price = entry*(1+target) if side == "long" else entry*(1-target)
     stop = entry-initial_mult*signal_atr if side == "long" else entry+initial_mult*signal_atr
     best = entry
@@ -73,7 +78,8 @@ def evaluate(x, i, side, target, hold, initial_mult, trail_mult):
             best = max(best, float(row.high))
             if not target_hit and float(row.high) >= target_price:
                 target_hit, target_bars = True, j+1
-            if target_hit: stop = max(stop, best-trail_mult*atr)
+            if target_hit:
+                stop = max(stop, best-trail_mult*atr)
             if float(row.low) <= stop:
                 exit_price, exit_bar = stop, j
                 exit_reason = "trailing_stop" if target_hit else "initial_stop"
@@ -82,7 +88,8 @@ def evaluate(x, i, side, target, hold, initial_mult, trail_mult):
             best = min(best, float(row.low))
             if not target_hit and float(row.low) <= target_price:
                 target_hit, target_bars = True, j+1
-            if target_hit: stop = min(stop, best+trail_mult*atr)
+            if target_hit:
+                stop = min(stop, best+trail_mult*atr)
             if float(row.high) >= stop:
                 exit_price, exit_bar = stop, j
                 exit_reason = "trailing_stop" if target_hit else "initial_stop"
@@ -97,53 +104,57 @@ def evaluate(x, i, side, target, hold, initial_mult, trail_mult):
 
 
 def run(frame, timeframe):
-    rows=[]
+    rows = []
     for n in DONCHIAN:
-        x=indicators(frame,n)
+        x = indicators(frame, n)
         for adx_min in ADX_LEVELS:
-            long_sig=(x.close>x.prior_high*1.0015)&(x.ema20>x.ema50)&(x.adx>=adx_min)&(x.rsi>=50)&(x.location>=.65)
-            short_sig=(x.close<x.prior_low*.9985)&(x.ema20<x.ema50)&(x.adx>=adx_min)&(x.rsi<=50)&(x.location<=.35)
-            for side,mask in [("long",long_sig),("short",short_sig)]:
+            long_sig = (x.close > x.prior_high*1.0015) & (x.ema20 > x.ema50) & (x.adx >= adx_min) & (x.rsi >= 50) & (x.location >= .65)
+            short_sig = (x.close < x.prior_low*.9985) & (x.ema20 < x.ema50) & (x.adx >= adx_min) & (x.rsi <= 50) & (x.location <= .35)
+            for side, mask in [("long", long_sig), ("short", short_sig)]:
                 for target in TARGETS:
                     for hold in HOLDS[timeframe]:
                         for initial_mult in INITIAL_STOPS:
                             for trail_mult in TRAIL_STOPS:
                                 for i in np.flatnonzero(mask.to_numpy()):
-                                    r=evaluate(x,int(i),side,target,hold,initial_mult,trail_mult)
-                                    if r:
-                                        r.update({"timeframe":timeframe,"donchian":n,"adx_min":adx_min})
-                                        rows.append(r)
+                                    result = evaluate(x, int(i), side, target, hold, initial_mult, trail_mult)
+                                    if result:
+                                        result.update({"timeframe": timeframe, "donchian": n, "adx_min": adx_min})
+                                        rows.append(result)
     return pd.DataFrame(rows)
 
 
 def summarize(events):
-    keys=["timeframe","side","target","donchian","adx_min","hold_bars","initial_stop_atr","trail_atr"]
-    g=events.groupby(keys,dropna=False)
-    out=g.agg(trades=("net_return","size"),target_rate=("target_hit","mean"),avg_net_return=("net_return","mean"),median_net_return=("net_return","median"),average_mfe=("mfe","mean"),gross_profit=("net_return",lambda s:s[s>0].sum()),gross_loss=("net_return",lambda s:abs(s[s<0].sum()))).reset_index()
-    out["profit_factor"]=out.gross_profit/out.gross_loss.replace(0,np.nan)
-    out["score"]=out.target_rate*out.profit_factor.clip(upper=5)*np.log1p(out.trades)
-    return out.sort_values(["score","target_rate","profit_factor"],ascending=False)
+    keys = ["timeframe", "side", "target", "donchian", "adx_min", "hold_bars", "initial_stop_atr", "trail_atr"]
+    grouped = events.groupby(keys, dropna=False)
+    summary = grouped.agg(trades=("net_return", "size"), target_rate=("target_hit", "mean"), avg_net_return=("net_return", "mean"), median_net_return=("net_return", "median"), average_mfe=("mfe", "mean"), gross_profit=("net_return", lambda s: s[s > 0].sum()), gross_loss=("net_return", lambda s: abs(s[s < 0].sum()))).reset_index()
+    summary["profit_factor"] = summary["gross_profit"] / summary["gross_loss"].replace(0, np.nan)
+    summary["score"] = summary["target_rate"] * summary["profit_factor"].clip(upper=5) * np.log1p(summary["trades"])
+    return summary.sort_values(["score", "target_rate", "profit_factor"], ascending=False)
 
 
 def main():
-    daily=load_file(DAILY_FILE)
-    hourly=load_file(HOURLY_FILE)
-    frames={"1d":daily,"1h":hourly,"4h":resample_ohlc(hourly,"4h")}
-    manifest={tf:{"rows":len(frame),"start":frame.index.min().isoformat() if len(frame) else None,"end":frame.index.max().isoformat() if len(frame) else None} for tf,frame in frames.items()}
-    (OUT/"analysis_manifest.json").write_text(json.dumps(manifest,indent=2),encoding="utf-8")
-    all_events=[]
-    for tf,frame in frames.items():
-        if len(frame)<250: continue
-        events=run(frame,tf)
+    daily = load_file(DAILY_FILE)
+    hourly = load_file(HOURLY_FILE)
+    frames = {"1d": daily, "1h": hourly, "4h": resample_ohlc(hourly, "4h")}
+    manifest = {tf: {"rows": len(frame), "start": frame.index.min().isoformat() if len(frame) else None, "end": frame.index.max().isoformat() if len(frame) else None} for tf, frame in frames.items()}
+    (OUT/"analysis_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    all_events = []
+    for timeframe, frame in frames.items():
+        if len(frame) < 250:
+            continue
+        events = run(frame, timeframe)
         if not events.empty:
-            events.to_csv(OUT/f"gold_events_{tf}.csv",index=False)
+            events.to_csv(OUT/f"gold_events_{timeframe}.csv", index=False)
             all_events.append(events)
-    if not all_events: raise RuntimeError("No backtest results. Check data coverage.")
-    events=pd.concat(all_events,ignore_index=True)
-    events.to_csv(OUT/"gold_events_all.csv",index=False)
-    summary=summarize(events)
-    summary.to_csv(OUT/"gold_summary_all.csv",index=False)
-    summary.head(100).to_csv(OUT/"gold_best_configurations.csv",index=False)
+    if not all_events:
+        raise RuntimeError("No backtest results. Check data coverage.")
+    events = pd.concat(all_events, ignore_index=True)
+    events.to_csv(OUT/"gold_events_all.csv", index=False)
+    summary = summarize(events)
+    summary.to_csv(OUT/"gold_summary_all.csv", index=False)
+    summary.head(100).to_csv(OUT/"gold_best_configurations.csv", index=False)
     print(summary.head(30).to_string(index=False))
 
-if __name__=="__main__": main()
+
+if __name__ == "__main__":
+    main()
