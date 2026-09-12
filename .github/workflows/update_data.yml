@@ -1,24 +1,47 @@
 name: Update gold data
+
 on:
+  # Gold futures trade during the weekday session.
+  # GitHub Actions uses UTC.
+  # Run hourly Monday-Friday.
   schedule:
-    - cron: '5 * * * *'
+    - cron: '5 * * * 1-5'
+
+  # Keep manual execution available.
   workflow_dispatch:
+
 permissions:
   contents: write
+
 jobs:
   update:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install -r requirements.txt
-      - run: python scripts/update_data.py
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Update Gold market data
+        run: python scripts/update_data.py
+
       - name: Commit updated data
         run: |
           git config user.name 'gold-dashboard-bot'
           git config user.email 'actions@users.noreply.github.com'
+
           git add data/gold_daily.csv data/gold_hourly.csv
-          git diff --cached --quiet || git commit -m "chore: update Yahoo gold data"
-          git push
+
+          if git diff --cached --quiet; then
+            echo "No new Gold market data to commit."
+          else
+            git commit -m "chore: update Yahoo gold data"
+            git push
+          fi
