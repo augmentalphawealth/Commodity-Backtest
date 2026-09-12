@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from pathlib import Path
 
 
@@ -398,7 +399,7 @@ def bool_value(value):
 # DATA LOADERS
 # ============================================================
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=900)
 def load_daily():
 
     from data import fetch_daily
@@ -406,7 +407,7 @@ def load_daily():
     return fetch_daily()
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def load_hourly():
 
     from data import fetch_hourly
@@ -833,6 +834,17 @@ with st.sidebar:
         value=False,
     )
 
+    if timeframe == "Daily":
+
+        show_donchian = st.checkbox(
+            "Show 50-day breakout level",
+            value=True,
+        )
+
+    else:
+
+        show_donchian = False
+
     st.divider()
 
     if st.button(
@@ -908,6 +920,17 @@ else:
             bounds=["sat", "mon"]
         )
     ]
+
+
+if show_donchian:
+
+    donchian_high = (
+        prices["High"]
+        .rolling(50, min_periods=50)
+        .max()
+        .shift(1)
+        .reindex(visible.index)
+    )
 
 
 # ============================================================
@@ -1116,14 +1139,55 @@ st.markdown(
 # MAIN CHART
 # ============================================================
 
-fig = go.Figure()
+last_candle = safe_timestamp(
+    visible.index.max()
+)
+
+checked_at = pd.Timestamp.now().strftime(
+    "%d %b %Y %H:%M"
+)
+
+st.caption(
+    f"Last available {timeframe.lower()} candle: "
+    f"{fmt_date(last_candle)} · "
+    f"Data checked: {checked_at}"
+)
+
+if show_volume:
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.025,
+        row_heights=[0.84, 0.16],
+    )
+
+else:
+
+    fig = go.Figure()
+
+
+def add_price_trace(trace):
+
+    if show_volume:
+
+        fig.add_trace(
+            trace,
+            row=1,
+            col=1,
+        )
+
+    else:
+
+        fig.add_trace(trace)
 
 
 # ------------------------------------------------------------
 # Price candles
 # ------------------------------------------------------------
 
-fig.add_trace(
+add_price_trace(
     go.Candlestick(
 
         x=visible.index,
@@ -1173,6 +1237,27 @@ fig.add_trace(
         ),
     )
 )
+
+
+if show_donchian:
+
+    add_price_trace(
+        go.Scatter(
+            x=visible.index,
+            y=donchian_high,
+            mode="lines",
+            name="50D breakout",
+            line=dict(
+                color="#3b82f6",
+                width=1.25,
+                dash="dot",
+            ),
+            hovertemplate=(
+                "50D breakout: %{y:,.2f}"
+                "<extra></extra>"
+            ),
+        )
+    )
 
 
 # ============================================================
@@ -1245,7 +1330,7 @@ if show_trade_links and not period_events.empty:
 
 
         # Light line only. Markers carry the meaning.
-        fig.add_trace(
+        add_price_trace(
             go.Scatter(
                 x=[
                     entry_x,
@@ -1512,7 +1597,7 @@ for spec in marker_defs:
 
     if x_values:
 
-        fig.add_trace(
+        add_price_trace(
             go.Scatter(
 
                 x=x_values,
@@ -1571,13 +1656,14 @@ if show_volume and "Volume" in visible.columns:
             name="Volume",
             opacity=0.13,
             marker_line_width=0,
-            yaxis="y2",
             hovertemplate=(
                 "%{x|%d %b %Y}<br>"
                 "Volume: %{y:,.0f}"
                 "<extra></extra>"
             ),
-        )
+        ),
+        row=2,
+        col=1,
     )
 
 
@@ -1587,7 +1673,7 @@ if show_volume and "Volume" in visible.columns:
 
 fig.update_layout(
 
-    height=720,
+    height=780 if show_volume else 740,
 
     template="plotly_white",
 
@@ -1702,21 +1788,33 @@ fig.update_layout(
         fixedrange=False,
     ),
 
-    yaxis2=dict(
-        title=None,
-        overlaying="y",
-        side="left",
-        showgrid=False,
-        showticklabels=False,
-        visible=show_volume,
-        fixedrange=True,
-    ),
-
     font=dict(
         family="Inter, -apple-system, BlinkMacSystemFont, "
                "'Segoe UI', sans-serif",
         color="#101828",
     ),
+)
+
+
+if show_volume:
+
+    fig.update_yaxes(
+        title=None,
+        showgrid=False,
+        showticklabels=False,
+        fixedrange=True,
+        row=2,
+        col=1,
+    )
+
+
+fig.update_xaxes(
+    rangebreaks=xaxis_rangebreaks,
+    tickformat="%b\n%Y",
+    ticklabelmode="period",
+    rangeslider_visible=False,
+    row=2 if show_volume else 1,
+    col=1,
 )
 
 
