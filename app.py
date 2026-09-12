@@ -1047,4 +1047,937 @@ with k6:
         else "—"
     )
 
-    st.
+    st.markdown(
+        metric_html(
+            "+3% milestone",
+            value,
+            "metric-positive",
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
+# CHART HEADER
+# ============================================================
+
+st.markdown(
+    f"""
+    <div class="chart-title-row">
+        <div>
+            <div class="chart-title">
+                {timeframe} historical replay
+            </div>
+            <div class="chart-note">
+                {fmt_date(start_ts)}
+                → {fmt_date(end_ts - pd.Timedelta(days=1))}
+                &nbsp; • &nbsp;
+                {trade_count} research trade(s)
+            </div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# MAIN CHART
+# ============================================================
+
+fig = go.Figure()
+
+
+# ------------------------------------------------------------
+# Price candles
+# ------------------------------------------------------------
+
+fig.add_trace(
+    go.Candlestick(
+
+        x=visible.index,
+
+        open=visible["Open"],
+
+        high=visible["High"],
+
+        low=visible["Low"],
+
+        close=visible["Close"],
+
+        name="Gold",
+
+        increasing=dict(
+            line=dict(
+                color="#16a34a",
+                width=1,
+            ),
+            fillcolor="#16a34a",
+        ),
+
+        decreasing=dict(
+            line=dict(
+                color="#dc2626",
+                width=1,
+            ),
+            fillcolor="#dc2626",
+        ),
+
+        whiskerwidth=0.35,
+
+        hoverlabel=dict(
+            bgcolor="white",
+            font=dict(
+                color="#101828"
+            ),
+        ),
+
+        hovertemplate=(
+            "<b>%{x|%d %b %Y}</b><br>"
+            "Open: %{open:,.2f}<br>"
+            "High: %{high:,.2f}<br>"
+            "Low: %{low:,.2f}<br>"
+            "Close: %{close:,.2f}"
+            "<extra></extra>"
+        ),
+    )
+)
+
+
+# ============================================================
+# TRADE LINKS
+# ============================================================
+
+if show_trade_links and not period_events.empty:
+
+    for _, row in period_events.iterrows():
+
+        entry_dt = safe_timestamp(
+            row["entry_date"]
+        )
+
+        exit_dt = safe_timestamp(
+            row["exit_date"]
+        )
+
+        # ----------------------------------------------------
+        # Find closest visible candles.
+        # ----------------------------------------------------
+
+        entry_candidates = visible.index[
+            visible.index >= entry_dt
+        ]
+
+        exit_candidates = visible.index[
+            visible.index >= exit_dt
+        ]
+
+        if len(entry_candidates):
+
+            entry_x = entry_candidates[0]
+
+        else:
+
+            entry_candidates = visible.index[
+                visible.index <= entry_dt
+            ]
+
+            if not len(entry_candidates):
+                continue
+
+            entry_x = entry_candidates[-1]
+
+
+        if len(exit_candidates):
+
+            exit_x = exit_candidates[0]
+
+        else:
+
+            exit_candidates = visible.index[
+                visible.index <= exit_dt
+            ]
+
+            if not len(exit_candidates):
+                continue
+
+            exit_x = exit_candidates[-1]
+
+
+        entry_price = float(
+            row["entry"]
+        )
+
+        exit_price = float(
+            row["exit"]
+        )
+
+
+        # Light line only. Markers carry the meaning.
+        fig.add_trace(
+            go.Scatter(
+                x=[
+                    entry_x,
+                    exit_x,
+                ],
+                y=[
+                    entry_price,
+                    exit_price,
+                ],
+                mode="lines",
+                line=dict(
+                    color="rgba(71,84,103,0.16)",
+                    width=1,
+                ),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+
+
+# ============================================================
+# SIGNAL MARKERS
+# ============================================================
+
+marker_defs = [
+
+    {
+        "name": "BUY",
+        "enabled": show_buy,
+        "date_col": "entry_date",
+        "symbol": "triangle-up",
+        "color": "#16a34a",
+        "size": 12,
+        "anchor": "below",
+    },
+
+    {
+        "name": "SL",
+        "enabled": show_sl,
+        "date_col": "exit_date",
+        "symbol": "x",
+        "color": "#dc2626",
+        "size": 11,
+        "anchor": "above",
+    },
+
+    {
+        "name": "TSL",
+        "enabled": show_tsl,
+        "date_col": "exit_date",
+        "symbol": "triangle-down",
+        "color": "#f59e0b",
+        "size": 11,
+        "anchor": "above",
+    },
+
+    {
+        "name": "TIME",
+        "enabled": show_time,
+        "date_col": "exit_date",
+        "symbol": "circle-open",
+        "color": "#667085",
+        "size": 10,
+        "anchor": "above",
+    },
+]
+
+
+for spec in marker_defs:
+
+    if not spec["enabled"]:
+        continue
+
+
+    name = spec["name"]
+
+    date_col = spec["date_col"]
+
+
+    # --------------------------------------------------------
+    # Filter event subset.
+    # --------------------------------------------------------
+
+    if name == "BUY":
+
+        subset = events[
+            events["side"].eq("long")
+        ].copy()
+
+    else:
+
+        subset = events[
+            events["exit_reason"].eq(name)
+        ].copy()
+
+
+    # --------------------------------------------------------
+    # Normalize the date column.
+    # --------------------------------------------------------
+
+    subset[date_col] = normalize_datetime(
+        subset[date_col]
+    )
+
+
+    # --------------------------------------------------------
+    # Time Machine range filter.
+    # --------------------------------------------------------
+
+    subset = subset[
+        (subset[date_col] >= start_ts)
+        &
+        (subset[date_col] < end_ts)
+    ].copy()
+
+
+    if subset.empty:
+        continue
+
+
+    x_values = []
+
+    y_values = []
+
+    hover_values = []
+
+
+    for _, row in subset.iterrows():
+
+        event_dt = safe_timestamp(
+            row[date_col]
+        )
+
+
+        # ----------------------------------------------------
+        # Match event to visible candle.
+        #
+        # DAILY:
+        # exact daily candle when available.
+        #
+        # HOURLY:
+        # first available hourly candle at/after event.
+        # ----------------------------------------------------
+
+        candidates = visible.index[
+            visible.index >= event_dt
+        ]
+
+
+        if len(candidates):
+
+            x = candidates[0]
+
+        else:
+
+            candidates = visible.index[
+                visible.index <= event_dt
+            ]
+
+            if not len(candidates):
+                continue
+
+            x = candidates[-1]
+
+
+        candle = visible.loc[x]
+
+
+        # ----------------------------------------------------
+        # Event price.
+        # ----------------------------------------------------
+
+        if name == "BUY":
+
+            event_price = float(
+                row["entry"]
+            )
+
+        else:
+
+            event_price = float(
+                row["exit"]
+            )
+
+
+        # ----------------------------------------------------
+        # Put markers close to actual event price rather than
+        # far away from the candle.
+        # ----------------------------------------------------
+
+        candle_range = (
+            float(candle["High"])
+            - float(candle["Low"])
+        )
+
+        if not np.isfinite(
+            candle_range
+        ) or candle_range <= 0:
+
+            candle_range = max(
+                abs(float(candle["Close"]))
+                * 0.002,
+                1.0,
+            )
+
+
+        if name == "BUY":
+
+            y = float(
+                candle["Low"]
+            ) - candle_range * 0.35
+
+        else:
+
+            y = float(
+                candle["High"]
+            ) + candle_range * 0.35
+
+
+        # ----------------------------------------------------
+        # Hover details.
+        # ----------------------------------------------------
+
+        if name == "BUY":
+
+            hover = (
+                "<b>🟢 BUY</b><br>"
+                f"Entry: {fmt_date(row['entry_date'])}"
+                f" @ {price(row['entry'])}<br>"
+                f"Exit: {fmt_date(row['exit_date'])}"
+                f" @ {price(row['exit'])}<br>"
+                f"Exit type: {row['exit_reason']}<br>"
+                f"Net: {pct(row['net_return'])}<br>"
+                f"+3% milestone: "
+                f"{'YES' if bool(row['target_hit']) else 'NO'}"
+                "<extra></extra>"
+            )
+
+        else:
+
+            hover = (
+                f"<b>{name}</b><br>"
+                f"Exit: {fmt_date(row['exit_date'])}"
+                f" @ {price(row['exit'])}<br>"
+                f"Entry: {fmt_date(row['entry_date'])}"
+                f" @ {price(row['entry'])}<br>"
+                f"Net: {pct(row['net_return'])}<br>"
+                f"+3% milestone: "
+                f"{'YES' if bool(row['target_hit']) else 'NO'}"
+                "<extra></extra>"
+            )
+
+
+        x_values.append(x)
+
+        y_values.append(y)
+
+        hover_values.append(hover)
+
+
+    # --------------------------------------------------------
+    # Add marker trace.
+    # --------------------------------------------------------
+
+    if x_values:
+
+        fig.add_trace(
+            go.Scatter(
+
+                x=x_values,
+
+                y=y_values,
+
+                mode="markers",
+
+                name=name,
+
+                marker=dict(
+
+                    symbol=spec["symbol"],
+
+                    size=spec["size"],
+
+                    color=spec["color"],
+
+                    line=dict(
+                        color="white",
+                        width=1,
+                    ),
+                ),
+
+                hovertemplate=(
+                    hover_values
+                ),
+
+                hovertext=hover_values,
+
+                hoverlabel=dict(
+                    bgcolor="white",
+                    bordercolor="#d0d5dd",
+                    font=dict(
+                        color="#101828"
+                    ),
+                ),
+            )
+        )
+
+
+# ============================================================
+# VOLUME
+# ============================================================
+
+if show_volume and "Volume" in visible.columns:
+
+    volume = visible["Volume"].fillna(0)
+
+    # Use a second y-axis so price scale is untouched.
+
+    fig.add_trace(
+        go.Bar(
+            x=visible.index,
+            y=volume,
+            name="Volume",
+            opacity=0.13,
+            marker_line_width=0,
+            yaxis="y2",
+            hovertemplate=(
+                "%{x|%d %b %Y}<br>"
+                "Volume: %{y:,.0f}"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+
+# ============================================================
+# CHART LAYOUT
+# ============================================================
+
+fig.update_layout(
+
+    height=720,
+
+    template="plotly_white",
+
+    margin=dict(
+        l=8,
+        r=18,
+        t=16,
+        b=12,
+    ),
+
+    paper_bgcolor="white",
+
+    plot_bgcolor="white",
+
+    hovermode="x unified",
+
+    dragmode="pan",
+
+    showlegend=True,
+
+    legend=dict(
+
+        orientation="h",
+
+        x=0,
+
+        y=1.015,
+
+        xanchor="left",
+
+        yanchor="bottom",
+
+        bgcolor="rgba(255,255,255,0.88)",
+
+        bordercolor="rgba(208,213,221,0.65)",
+
+        borderwidth=1,
+
+        font=dict(
+            size=11,
+            color="#344054",
+        ),
+    ),
+
+    xaxis=dict(
+
+        title=None,
+
+        showgrid=False,
+
+        rangeslider=dict(
+            visible=False,
+        ),
+
+        showline=True,
+
+        linecolor="#d0d5dd",
+
+        linewidth=1,
+
+        tickfont=dict(
+            size=10,
+            color="#667085",
+        ),
+
+        showspikes=True,
+
+        spikecolor="#98a2b3",
+
+        spikethickness=1,
+
+        spikedash="dot",
+
+        spikesnap="cursor",
+
+        rangeslider_thickness=0.04,
+
+        fixedrange=False,
+    ),
+
+    yaxis=dict(
+
+        title=None,
+
+        side="right",
+
+        showgrid=True,
+
+        gridcolor="rgba(16,24,40,0.055)",
+
+        zeroline=False,
+
+        showline=True,
+
+        linecolor="#d0d5dd",
+
+        linewidth=1,
+
+        tickfont=dict(
+            size=10,
+            color="#667085",
+        ),
+
+        tickformat=",.0f",
+
+        fixedrange=False,
+    ),
+
+    yaxis2=dict(
+        title=None,
+        overlaying="y",
+        side="left",
+        showgrid=False,
+        showticklabels=False,
+        visible=show_volume,
+        fixedrange=True,
+    ),
+
+    font=dict(
+        family="Inter, -apple-system, BlinkMacSystemFont, "
+               "'Segoe UI', sans-serif",
+        color="#101828",
+    ),
+)
+
+
+# ============================================================
+# CHART BUTTONS / TOOLBAR
+# ============================================================
+
+config = {
+
+    "displaylogo": False,
+
+    "scrollZoom": True,
+
+    "responsive": True,
+
+    "modeBarButtonsToRemove": [
+        "lasso2d",
+        "select2d",
+        "autoScale2d",
+        "toggleSpikelines",
+    ],
+
+    "toImageButtonOptions": {
+        "format": "png",
+        "filename": (
+            "gold_strategy_"
+            f"{timeframe.lower()}_"
+            f"{start_ts.strftime('%Y%m%d')}_"
+            f"{(end_ts - pd.Timedelta(days=1)).strftime('%Y%m%d')}"
+        ),
+        "height": 1000,
+        "width": 1800,
+        "scale": 2,
+    },
+}
+
+
+# ============================================================
+# RENDER CHART
+# ============================================================
+
+st.plotly_chart(
+    fig,
+    use_container_width=True,
+    config=config,
+    key="gold_time_machine_chart",
+)
+
+
+# ============================================================
+# RESEARCH CONFIGURATION
+# ============================================================
+
+with st.expander(
+    "Strategy configuration",
+    expanded=False,
+):
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    with c1:
+
+        st.markdown(
+            "**Market**"
+        )
+
+        st.write(
+            RESEARCH_CONFIG["Market"]
+        )
+
+        st.markdown(
+            "**Direction**"
+        )
+
+        st.write(
+            RESEARCH_CONFIG["Direction"]
+        )
+
+    with c2:
+
+        st.markdown(
+            "**Breakout**"
+        )
+
+        st.write(
+            RESEARCH_CONFIG["Breakout"]
+        )
+
+        st.markdown(
+            "**ADX**"
+        )
+
+        st.write(
+            RESEARCH_CONFIG["ADX"]
+        )
+
+    with c3:
+
+        st.markdown(
+            "**Initial stop**"
+        )
+
+        st.write(
+            RESEARCH_CONFIG["Initial SL"]
+        )
+
+        st.markdown(
+            "**Trailing stop**"
+        )
+
+        st.write(
+            RESEARCH_CONFIG["Trailing SL"]
+        )
+
+    with c4:
+
+        st.markdown(
+            "**Max hold**"
+        )
+
+        st.write(
+            RESEARCH_CONFIG["Max hold"]
+        )
+
+        st.markdown(
+            "**Target**"
+        )
+
+        st.write(
+            RESEARCH_CONFIG["Milestone"]
+        )
+
+    st.caption(
+        "The +3% level is a research milestone, "
+        "not a forced take-profit."
+    )
+
+
+# ============================================================
+# TRADE TABLE
+# ============================================================
+
+st.markdown(
+    "### Historical trades"
+)
+
+st.markdown(
+    f"""
+    <div class="section-note">
+        Trades whose entry falls inside
+        {fmt_date(start_ts)}
+        → {fmt_date(end_ts - pd.Timedelta(days=1))}.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+if period_events.empty:
+
+    st.info(
+        "No research trades occurred in the selected period."
+    )
+
+else:
+
+    table = period_events.copy()
+
+    table["BUY"] = table["entry_date"].map(
+        fmt_date
+    )
+
+    table["ENTRY"] = table["entry"].map(
+        price
+    )
+
+    table["EXIT DATE"] = table["exit_date"].map(
+        fmt_date
+    )
+
+    table["EXIT"] = table["exit"].map(
+        price
+    )
+
+    table["EXIT TYPE"] = table[
+        "exit_reason"
+    ]
+
+    table["NET"] = table[
+        "net_return"
+    ].map(
+        pct
+    )
+
+    table["+3%"] = table[
+        "target_hit"
+    ].map(
+        lambda x:
+            "YES"
+            if bool(x)
+            else "NO"
+    )
+
+    table = table[
+        [
+            "BUY",
+            "ENTRY",
+            "EXIT DATE",
+            "EXIT",
+            "EXIT TYPE",
+            "NET",
+            "+3%",
+        ]
+    ]
+
+    st.dataframe(
+        table,
+        use_container_width=True,
+        hide_index=True,
+        height=min(
+            430,
+            90 + len(table) * 35,
+        ),
+    )
+
+
+# ============================================================
+# PERIOD DIAGNOSTIC
+# ============================================================
+
+with st.expander(
+    "Data / diagnostic details",
+    expanded=False,
+):
+
+    d1, d2, d3 = st.columns(3)
+
+    with d1:
+
+        st.metric(
+            "Price data starts",
+            fmt_date(data_start),
+        )
+
+        st.metric(
+            "Selected candles",
+            f"{len(visible):,}",
+        )
+
+    with d2:
+
+        st.metric(
+            "Price data ends",
+            fmt_date(data_end),
+        )
+
+        st.metric(
+            "Trades in range",
+            f"{trade_count}",
+        )
+
+    with d3:
+
+        st.metric(
+            "+3% hits",
+            f"{target_hits}",
+        )
+
+        st.metric(
+            "Median net / trade",
+            (
+                f"{median_return * 100:+.2f}%"
+                if np.isfinite(
+                    median_return
+                )
+                else "—"
+            ),
+        )
+
+    st.caption(
+        "All chart filtering and event-date comparisons "
+        "are performed on timezone-naive timestamps to "
+        "prevent pandas timezone comparison failures."
+    )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.markdown(
+    f"""
+    <div class="tm-footer">
+        Gold Strategy Time Machine
+        • {timeframe} view
+        • {fmt_date(start_ts)} → {fmt_date(end_ts - pd.Timedelta(days=1))}
+        • Data through {fmt_date(data_end)}
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
