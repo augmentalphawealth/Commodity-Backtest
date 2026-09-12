@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from pathlib import Path
 
 
@@ -829,11 +828,6 @@ with st.sidebar:
         ),
     )
 
-    show_volume = st.checkbox(
-        "Show volume",
-        value=False,
-    )
-
     if timeframe == "Daily":
 
         show_donchian = st.checkbox(
@@ -1153,34 +1147,12 @@ st.caption(
     f"Data checked: {checked_at}"
 )
 
-if show_volume:
-
-    fig = make_subplots(
-        rows=2,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.025,
-        row_heights=[0.84, 0.16],
-    )
-
-else:
-
-    fig = go.Figure()
+fig = go.Figure()
 
 
 def add_price_trace(trace):
 
-    if show_volume:
-
-        fig.add_trace(
-            trace,
-            row=1,
-            col=1,
-        )
-
-    else:
-
-        fig.add_trace(trace)
+    fig.add_trace(trace)
 
 
 # ------------------------------------------------------------
@@ -1640,40 +1612,12 @@ for spec in marker_defs:
 
 
 # ============================================================
-# VOLUME
-# ============================================================
-
-if show_volume and "Volume" in visible.columns:
-
-    volume = visible["Volume"].fillna(0)
-
-    # Use a second y-axis so price scale is untouched.
-
-    fig.add_trace(
-        go.Bar(
-            x=visible.index,
-            y=volume,
-            name="Volume",
-            opacity=0.13,
-            marker_line_width=0,
-            hovertemplate=(
-                "%{x|%d %b %Y}<br>"
-                "Volume: %{y:,.0f}"
-                "<extra></extra>"
-            ),
-        ),
-        row=2,
-        col=1,
-    )
-
-
-# ============================================================
 # CHART LAYOUT
 # ============================================================
 
 fig.update_layout(
 
-    height=780 if show_volume else 740,
+    height=740,
 
     template="plotly_white",
 
@@ -1794,27 +1738,6 @@ fig.update_layout(
         color="#101828",
     ),
 )
-
-
-if show_volume:
-
-    fig.update_yaxes(
-        title=None,
-        showgrid=False,
-        showticklabels=False,
-        fixedrange=True,
-        row=2,
-        col=1,
-    )
-
-    fig.update_xaxes(
-        rangebreaks=xaxis_rangebreaks,
-        tickformat="%b\n%Y",
-        ticklabelmode="period",
-        rangeslider_visible=False,
-        row=2,
-        col=1,
-    )
 
 
 # ============================================================
