@@ -879,6 +879,37 @@ if visible.empty:
     st.stop()
 
 
+# Collapse non-trading dates in the daily view so sparse source
+# data does not leave visual gaps between adjacent candles.
+if timeframe == "Daily":
+
+    visible_days = pd.DatetimeIndex(
+        visible.index
+    ).normalize().unique()
+
+    calendar_days = pd.date_range(
+        visible_days.min(),
+        visible_days.max(),
+        freq="D",
+    )
+
+    xaxis_rangebreaks = [
+        dict(
+            values=calendar_days.difference(
+                visible_days
+            )
+        )
+    ]
+
+else:
+
+    xaxis_rangebreaks = [
+        dict(
+            bounds=["sat", "mon"]
+        )
+    ]
+
+
 # ============================================================
 # FILTER RESEARCH TRADES
 # ============================================================
@@ -1604,6 +1635,12 @@ fig.update_layout(
     xaxis=dict(
 
         title=None,
+
+        rangebreaks=xaxis_rangebreaks,
+
+        tickformat="%b\n%Y",
+
+        ticklabelmode="period",
 
         showgrid=False,
 
