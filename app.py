@@ -1807,15 +1807,14 @@ if show_volume:
         col=1,
     )
 
-
-fig.update_xaxes(
-    rangebreaks=xaxis_rangebreaks,
-    tickformat="%b\n%Y",
-    ticklabelmode="period",
-    rangeslider_visible=False,
-    row=2 if show_volume else 1,
-    col=1,
-)
+    fig.update_xaxes(
+        rangebreaks=xaxis_rangebreaks,
+        tickformat="%b\n%Y",
+        ticklabelmode="period",
+        rangeslider_visible=False,
+        row=2,
+        col=1,
+    )
 
 
 # ============================================================
